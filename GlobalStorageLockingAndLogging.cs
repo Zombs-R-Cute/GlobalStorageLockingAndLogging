@@ -230,15 +230,17 @@ namespace Shauna.GlobalStorageLockingAndLogging
             switch (playerItemState.itemState)
             {
                 case PlayerItemState.ItemState.Normal:
-                    if(playerItemState.sJar == null)
-                        return;
-                    
+                   
                     if (player.IsInVehicle) // ignore vehicle storage
                         return;
-                    // no vehicle, see if on own claim 
-                    if (PlayersOwnsStorage(player, player.Inventory.storage.owner, player.Inventory.storage.group)) // ignore own claim
+                    
+                    // no vehicle, see if in own storage 
+                    
+                    if(player.Inventory.storage == null) //check if storage is opened.
                         return;
-
+                    
+                    if (PlayersOwnsStorage(player, player.Inventory.storage.owner, player.Inventory.storage.group)) // ignore own storage
+                        return;
 
                     if (!playerItemState.hasItem())
                         return;
@@ -252,24 +254,24 @@ namespace Shauna.GlobalStorageLockingAndLogging
                     else
                         return;
 
-                    if (Configuration.Instance.LockStorage)
-                    {
-                        player.Inventory.tryAddItem(playerItemState.sJar.item, playerItemState.sJar.x,
-                            playerItemState.sJar.y, playerItemState.sPage,
-                            playerItemState.sJar
-                                .rot); //restore the item to it's original position which triggers an recursive event
-
-                        player.Inventory.removeItem(page, index);
-                    }
-                    else
-                        playerItemState.itemState = PlayerItemState.ItemState.Normal;
-
                     if (Configuration.Instance.LogStorageAction)
                     {
                         var ownerCSteamID = player.Inventory.storage.owner;
 
                         LogPlayersAction(jar.item.id, player, ownerCSteamID, Configuration.Instance.LockStorage);
                     }
+
+                    if (Configuration.Instance.LockStorage)
+                    {
+                        player.Inventory.tryAddItem(playerItemState.sJar.item, playerItemState.sJar.x,
+                            playerItemState.sJar.y, playerItemState.sPage,
+                            playerItemState.sJar.rot); //restore the item to it's original position which triggers an recursive event
+
+                        player.Inventory.removeItem(page, index);
+                    }
+                    else
+                        playerItemState.itemState = PlayerItemState.ItemState.Normal;
+
 
                     break;
             }
