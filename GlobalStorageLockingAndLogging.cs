@@ -346,7 +346,7 @@ namespace Shauna.GlobalStorageLockingAndLogging
 
         private bool PlayersOwnsStorage(UnturnedPlayer player, CSteamID owner, CSteamID group)
         {
-            if (player.CSteamID == owner || player.SteamGroupID != CSteamID.Nil && player.SteamGroupID == group && Configuration.Instance.GroupCanAccess)
+            if (player.CSteamID == owner || player.Player.quests.groupID != CSteamID.Nil && player.Player.quests.groupID == group && Configuration.Instance.GroupCanAccess)
                 return true;
             
             return false;
