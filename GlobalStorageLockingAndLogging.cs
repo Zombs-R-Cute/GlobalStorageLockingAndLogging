@@ -2,12 +2,13 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
+using HarmonyLib;
 using Newtonsoft.Json;
 using Rocket.Core.Plugins;
 using Rocket.Unturned;
+using Rocket.Unturned.Chat;
 using Rocket.Unturned.Items;
 using Rocket.Unturned.Player;
-using SDG.Framework.IO.Deserialization;
 using SDG.Unturned;
 using Steamworks;
 using UnityEngine;
@@ -16,52 +17,27 @@ using Logger = Rocket.Core.Logging.Logger;
 
 namespace Shauna.GlobalStorageLockingAndLogging
 {
-    public class PlayerItemState
-    {
-        public enum ItemState
-        {
-            Normal, // Nothing to undo
-            UndoMove, // A thief trying to steal from a crate
-        }
-
-        public byte sPage;
-        public byte sIndex;
-        public ItemJar sJar;
-        public ItemState itemState = ItemState.Normal;
-
-        public void SetSource(byte page, byte index, ItemJar jar)
-        {
-            sPage = page;
-            sIndex = index;
-            sJar = jar;
-        }
-
-        public void ClearSource()
-        {
-            sJar = null;
-        }
-
-        public bool hasItem()
-        {
-            return sJar != null;
-        }
-    }
-
+    [HarmonyPatch]
     public class GlobalStorageLockingAndLogging : RocketPlugin<GlobalStorageLockingAndLoggingConfiguration>
     {
         string filename = "Plugins/GlobalStorageLockingAndLogging/ID-Name.json";
 
-        /// <summary>
-        /// Maintains the state of items moved for preventing theft by essentially locking storage
-        /// </summary>
-        private Dictionary<CSteamID, PlayerItemState> _PlayerState = new Dictionary<CSteamID, PlayerItemState>(0);
-
+        public static GlobalStorageLockingAndLogging instance;
         private int _dictionarySaveInterval = 60000;
         private Dictionary<string, string> _DisplayNames;
 
         protected override void Load()
         {
             Logger.Log("Starting GlobalStorageLockingAndLogging");
+            instance = this;
+
+            if(Configuration.Instance.LockStorage)
+            {
+                Harmony harmony = new Harmony("GlobalStorageLockingAndLogging");
+                harmony.PatchAll();
+            }
+            
+
             BarricadeManager.onHarvestPlantRequested += (CSteamID steamid, byte x, byte y, ushort plant, ushort index,
                     ref bool shouldallow) =>
                 OnHarvestOrSalvageRequested(steamid, x, y, plant, index, ref shouldallow, true);
@@ -82,7 +58,32 @@ namespace Shauna.GlobalStorageLockingAndLogging
             Thread backgroundSaveThread = new Thread(DisplayNameBackgroundThread);
             backgroundSaveThread.Start();
         }
+        
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(PlayerInventory), nameof(PlayerInventory.sendStorage))]
+        static bool sendStorage(PlayerInventory __instance)
+        {
+            bool allowed = false;
+            
+            var player = UnturnedPlayer.FromPlayer(__instance.player);
 
+            if ( PlayersOwnsStorage(player, __instance.storage.owner, __instance.storage.group))
+                allowed = true;
+
+            if (instance.Configuration.Instance.EnableAdminOverride && player.IsAdmin)
+                allowed = true;
+
+            // if (__instance.storage.items.has(instance.Configuration.Instance.UnlockedStorageItemId) != null)
+            //     allowed = true;
+            
+            if(!allowed)
+            {
+                UnturnedChat.Say(player, "You are not allowed to access this storage.", Color.red);
+            }
+
+            return allowed;
+        }
+  
         protected override void Unload()
         {
             SaveID2NameDictionary();
@@ -132,9 +133,6 @@ namespace Shauna.GlobalStorageLockingAndLogging
 
         private void EventsOnOnPlayerConnected(UnturnedPlayer player)
         {
-            _PlayerState[player.CSteamID] = new PlayerItemState();
-            PlayerSubscribeToOnInventoryAdded(player);
-            PlayerSubscribeToOnInventoryRemoved(player);
             PlayerSubscribeToDropRequested(player);
             lock (_DisplayNames)
             {
@@ -145,8 +143,6 @@ namespace Shauna.GlobalStorageLockingAndLogging
 
         private void EventsOnOnPlayerDisconnected(UnturnedPlayer player)
         {
-            PlayerUnsubscribeToOnInventoryAdded(player);
-            PlayerUnsubscribeToOnInventoryRemoved(player);
             PlayerUnsubscribeToDropRequested(player);
         }
 
@@ -155,7 +151,7 @@ namespace Shauna.GlobalStorageLockingAndLogging
         {
             player.Player.inventory.onDropItemRequested +=
                 (PlayerInventory inventory, Item item, ref bool allow) =>
-                    ONDropItemRequested(inventory, item, ref allow, player);
+                    OnDropItemRequested(inventory, item, ref allow, player);
         }
 
 
@@ -163,36 +159,11 @@ namespace Shauna.GlobalStorageLockingAndLogging
         {
             player.Player.inventory.onDropItemRequested -=
                 (PlayerInventory inventory, Item item, ref bool allow) =>
-                    ONDropItemRequested(inventory, item, ref allow, player);
+                    OnDropItemRequested(inventory, item, ref allow, player);
         }
 
 
-        private void PlayerSubscribeToOnInventoryAdded(UnturnedPlayer player)
-        {
-            player.Player.inventory.onInventoryAdded +=
-                (page, index, jar) => OnInventoryAdded(page, index, jar, player);
-        }
-
-        private void PlayerSubscribeToOnInventoryRemoved(UnturnedPlayer player)
-        {
-            player.Player.inventory.onInventoryRemoved +=
-                (page, index, jar) => ONInventoryRemoved(page, index, jar, player);
-        }
-
-        private void PlayerUnsubscribeToOnInventoryAdded(UnturnedPlayer player)
-        {
-            player.Player.inventory.onInventoryAdded -=
-                (page, index, jar) => OnInventoryAdded(page, index, jar, player);
-        }
-
-        private void PlayerUnsubscribeToOnInventoryRemoved(UnturnedPlayer player)
-        {
-            player.Player.inventory.onInventoryRemoved -=
-                (page, index, jar) => ONInventoryRemoved(page, index, jar, player);
-        }
-
-
-        private void ONDropItemRequested(PlayerInventory inventory, Item item, ref bool shouldAllow,
+        private void OnDropItemRequested(PlayerInventory inventory, Item item, ref bool shouldAllow,
             UnturnedPlayer player)
         {
             if (inventory.storage == null) // apparently personal storage is null
@@ -204,78 +175,6 @@ namespace Shauna.GlobalStorageLockingAndLogging
             }
         }
 
-
-        private void ONInventoryRemoved(byte page, byte index, ItemJar jar, UnturnedPlayer player)
-        {
-            PlayerItemState playerItemState = _PlayerState[player.CSteamID];
-
-            switch (playerItemState.itemState)
-            {
-                case PlayerItemState.ItemState.Normal:
-                    playerItemState.SetSource(page, index, jar);
-                    break;
-
-                case PlayerItemState.ItemState.UndoMove:
-                    playerItemState.ClearSource();
-                    playerItemState.itemState = PlayerItemState.ItemState.Normal;
-                    break;
-            }
-        }
-
-
-        private void OnInventoryAdded(byte page, byte index, ItemJar jar, UnturnedPlayer player)
-        {
-            PlayerItemState playerItemState = _PlayerState[player.CSteamID]; // grab a local
-
-            switch (playerItemState.itemState)
-            {
-                case PlayerItemState.ItemState.Normal:
-                   
-                    if (player.IsInVehicle) // ignore vehicle storage
-                        return;
-                    
-                    // no vehicle, see if in own storage 
-                    
-                    if(player.Inventory.storage == null) //check if storage is opened.
-                        return;
-                    
-                    if (PlayersOwnsStorage(player, player.Inventory.storage.owner, player.Inventory.storage.group)) // ignore own storage
-                        return;
-
-                    if (!playerItemState.hasItem())
-                        return;
-
-                    if (isFreeCrate(player) && playerItemState.sJar.item.id != Configuration.Instance.UnlockedStorageItemId)
-                        return;
-
-                    // page: 2 = Hands, 3 = Backpack, 4 = Vest, 5 = Top, 6 = Bottom, 7 = External
-                    if (playerItemState.sJar.item.id == Configuration.Instance.UnlockedStorageItemId || playerItemState.sPage == 7)
-                        playerItemState.itemState = PlayerItemState.ItemState.UndoMove;
-                    else
-                        return;
-
-                    if (Configuration.Instance.LogStorageAction)
-                    {
-                        var ownerCSteamID = player.Inventory.storage.owner;
-
-                        LogPlayersAction(jar.item.id, player, ownerCSteamID, Configuration.Instance.LockStorage);
-                    }
-
-                    if (Configuration.Instance.LockStorage)
-                    {
-                        player.Inventory.tryAddItem(playerItemState.sJar.item, playerItemState.sJar.x,
-                            playerItemState.sJar.y, playerItemState.sPage,
-                            playerItemState.sJar.rot); //restore the item to it's original position which triggers an recursive event
-
-                        player.Inventory.removeItem(page, index);
-                    }
-                    else
-                        playerItemState.itemState = PlayerItemState.ItemState.Normal;
-
-
-                    break;
-            }
-        }
 
         private void LogPlayersAction(ushort id, UnturnedPlayer player, CSteamID owner, bool attempted)
         {
@@ -292,21 +191,6 @@ namespace Shauna.GlobalStorageLockingAndLogging
                     UnturnedItems.GetItemAssetById(id).itemName,
                     id)
             );
-        }
-
-
-        private bool isFreeCrate(UnturnedPlayer player)
-        {
-            byte itemCount = player.Player.inventory.getItemCount(7);
-            for (byte index = 0; index < itemCount; index++)
-            {
-                if (player.Player.inventory.getItem(7, index).item.id == Configuration.Instance.UnlockedStorageItemId)
-                {
-                    return true;
-                }
-            }
-
-            return false;
         }
 
 
@@ -344,9 +228,13 @@ namespace Shauna.GlobalStorageLockingAndLogging
         }
 
 
-        private bool PlayersOwnsStorage(UnturnedPlayer player, CSteamID owner, CSteamID group)
+        private static bool PlayersOwnsStorage(UnturnedPlayer player, CSteamID owner, CSteamID group)
         {
-            if (player.CSteamID == owner || player.Player.quests.groupID != CSteamID.Nil && player.Player.quests.groupID == group && Configuration.Instance.GroupCanAccess)
+            if ((player.CSteamID == owner 
+                || player.Player.quests.groupID != CSteamID.Nil 
+                && player.Player.quests.groupID == group 
+                && instance.Configuration.Instance.GroupCanAccess)
+                || owner == CSteamID.Nil)//an airdrop has no owner
                 return true;
             
             return false;
